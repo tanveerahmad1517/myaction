@@ -6,88 +6,97 @@ on:
 jobs:
   secure-rdp:
     runs-on: windows-latest
-    timeout-minutes: 3600
+    timeout-minutes: 3600   # Maximum allowed
 
     steps:
       - name: Configure RDP Settings
         run: |
           Write-Host "=== Configuring RDP ==="
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "MinEncryptionLevel" -Value 1 -Force
-          
+
+          # Enable RDP
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+            -Name "fDenyTSConnections" -Value 0 -Force
+
+          # Disable NLA (Network Level Authentication) - Very Important
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name "UserAuthentication" -Value 0 -Force
+
+          # Set Security Layer to RDP (most compatible)
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name "SecurityLayer" -Value 0 -Force
+
+          # Additional compatibility settings
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name "MinEncryptionLevel" -Value 1 -Force
+
+          # Firewall Rule
           netsh advfirewall firewall delete rule name="RDP-Tailscale" | Out-Null
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
-          
+
+          # Restart RDP Service
           Restart-Service -Name TermService -Force
+
           Write-Host "RDP Configuration Completed"
 
       - name: Create RDP User
         run: |
           Write-Host "=== Creating RDP User ==="
+
           $Password = ConvertTo-SecureString "pHM41zo5,%eL;+3A" -AsPlainText -Force
+
+          # Remove user if exists
           if (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue) {
             Remove-LocalUser -Name "RDP" -ErrorAction SilentlyContinue
           }
+
           New-LocalUser -Name "RDP" -Password $Password -FullName "RDP User" -Description "Tailscale RDP" -AccountNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member "RDP"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
+
           Write-Host "RDP User created successfully"
 
       - name: Initialize Desktop Session
         run: |
           Write-Host "=== Initializing Desktop Session ==="
+
+          # Start Explorer to create proper user session
           Start-Process explorer.exe
+
           Start-Sleep -Seconds 10
+
+          # Try to create user profile directory
           New-Item -Path "C:\Users\RDP" -ItemType Directory -Force | Out-Null
+
           Write-Host "Desktop session initialized"
 
       - name: Install Tailscale
         run: |
           Write-Host "=== Installing Tailscale ==="
+
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
           $installerPath = "$env:TEMP\tailscale.msi"
+
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
           Remove-Item $installerPath -Force
+
           Write-Host "Tailscale installed"
 
-      - name: Start & Login Tailscale (Force Re-login)
+      - name: Start Tailscale
         run: |
-          Write-Host "=== Starting Tailscale with Force Login ==="
+          Write-Host "=== Starting Tailscale ==="
 
-          $ts = "$env:ProgramFiles\Tailscale\tailscale.exe"
-
-          # Kill any existing Tailscale processes
-          Write-Host "Killing existing Tailscale processes..."
-          Get-Process -Name "tailscale*" -ErrorAction SilentlyContinue | Stop-Process -Force
-
-          # Force logout first
-          Write-Host "Logging out from Tailscale..."
-          & $ts logout 2>&1 | Out-Null
-
-          Start-Sleep -Seconds 3
-
-          # Now login with auth key
-          Write-Host "Logging in with Auth Key..."
-          & $ts up `
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up `
             --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} `
             --hostname=gh-runner-rdp-${{ github.run_id }} `
             --advertise-tags=tag:rdp `
-            --accept-routes=false `
-            --reset
-
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error "Tailscale login failed! Check your TAILSCALE_AUTH_KEY"
-            exit 1
-          }
+            --accept-routes=false
 
           Start-Sleep -Seconds 8
 
-          # Get IP
-          $tsIP = & $ts ip -4
+          $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+
           Write-Host "Tailscale IP: $tsIP"
 
       - name: Verify RDP Port
@@ -97,7 +106,7 @@ jobs:
           if ($test.TcpTestSucceeded) {
             Write-Host "RDP Port is open and reachable ✅"
           } else {
-            Write-Warning "RDP Port test failed (but Tailscale may still be working)"
+            Write-Error "RDP Port test failed"
           }
 
       - name: Show Connection Details
